@@ -1,0 +1,5 @@
+*.vsidx
+*.lock
+*.suo
+*.json
+*.sqlite

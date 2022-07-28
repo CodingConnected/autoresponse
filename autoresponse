@@ -1,0 +1,213 @@
+#!/bin/bash
+#+----------------------------------------------------------+
+#| autoresponse 1.6.3 - an autoresponder script for postfix |
+#| Original script: Charles Hamilton - musashi@nefaria.com  |
+#| This version: Menno van der Woude                        |
+#| This program is GNU/GPL software, see LICENSE for info   |
+#+----------------------------------------------------------+
+
+shopt -s -o nounset 
+shopt -s extglob
+
+if [ "${#}" -eq "0" ]; then
+	printf "%s\n" "Autoresponse v. 1.6.3"
+	printf "%s\n" "Type -h for help"
+	exit 0
+fi
+
+declare RECIPIENT="unset"
+declare SENDER="unset"
+declare SASL_USERNAME="unset"
+declare CLIENT_IP="unset"
+declare AUTHENTICATED="unset"
+declare AUTORESPONSE_MESSAGE="unset"
+declare DISABLE_AUTORESPONSE="unset"
+declare ENABLE_AUTORESPONSE="unset"
+declare DELETE_AUTORESPONSE="unset"
+declare SEND_RESPONSE="unset"
+declare RESPONSES_DIR="/var/spool/autoresponse/responses"
+declare SENDMAIL="/usr/sbin/sendmail"
+declare RATE_LOG_DIR="/var/spool/autoresponse/log"
+declare LOGGER="/usr/bin/logger"
+#There are two different modes of operation:
+#	MODE="0" represents the actions that can not be executed from the command line
+#	MODE="1" represents the actions that can be executed from the command line
+declare MODE="0" 
+#Time limit, in seconds that determines how often an
+#autoresponse will be sent, per e-mail address (3600 = 1 hour, 86400 = 1 day)
+declare RESPONSE_RATE="86400"
+
+while getopts "r:s:S:C:e:d:E:D:h" SWITCH; do
+	case "${SWITCH}" in
+		r) #Set the recipient's address
+			RECIPIENT="`echo ${OPTARG} | tr '[:upper:]' '[:lower:]'`"
+			SEND_RESPONSE="1"
+		;;
+		s) #Set the sender's address
+			SENDER="`echo ${OPTARG} | tr '[:upper:]' '[:lower:]'`"
+			SEND_RESPONSE="1"
+		;;
+		S) #If SASL_USERNAME exists then the user was authenticated       
+			SASL_USERNAME="${OPTARG}"
+			if [ -z "${SASL_USERNAME}" ]; then
+				AUTHENTICATED="0"
+			else
+				AUTHENTICATED="1"
+			fi
+		;;
+		C) #IP address of client (sender)
+			CLIENT_IP="${OPTARG}"
+		;;
+		e) #Set the filename of the user's autoresponse message
+		   #This is used for creating/editing new autoresponse messages
+			AUTORESPONSE_MESSAGE="${OPTARG}"
+			MODE="1"
+		;;
+		d) #Disable an existing autoresponse message
+			DISABLE_AUTORESPONSE="${OPTARG}"
+			MODE="1"
+		;;
+		E) #Enable an existing autoresponse message
+			ENABLE_AUTORESPONSE="${OPTARG}"
+			MODE="1"
+		;;
+		D) #Delete an existing autoresponse message
+			DELETE_AUTORESPONSE="${OPTARG}"
+			MODE="1"
+		;;
+		h|*) #Print the help dialog and exit
+			echo -e "\n${0} [-r {recipient email} -s {sender email} -S {sasl username} -C {client ip}] [-e {email address}] [-d {email address}] [-E {email address}] [-D {email address}] [-h]\n"
+			echo -e "   -r, -s, -S, and optionally -C must be used together to specify a recipient, sender, sasl username, and client IP of an autoresponse message."
+			echo -e "   Normally you configure these in postfix's \"master.cf\" but they can be used from the terminal as well (only for testing purposes!)."
+			echo -e "   If this is executed from a terminal, you'll need to hit CTRL-D when you are finished typing your autoresponse message.\n"
+			echo "   -e is used to create a new autoresponse or edit an existing one for the specified user."
+			echo -e "   If a disabled autoresponse message exists, it will be ignored and a new message will be created.\n"
+			echo -e "   -d is used to disable an existing active autoresponse message.\n"
+			echo "   -E is used to enable an existing autoresponse message. If both a disabled AND and an active autoresponse message exist,"
+			echo -e "   the active message will be overwritten by the disabled one.\n"
+			echo -e "   -D is used to delete an existing autoresponse message, it will not delete disabled autoresponse messages.\n"
+			echo -e "   -h prints this help menu\n"
+			exit 0
+		;;
+	esac
+done
+
+#If a SASL authenticated user wants to set their autoresponse message via e-mail...
+if [ "${AUTHENTICATED}" = "1" ] && [ "${RECIPIENT/@*/}" = "${SENDER/@*/+autoresponse}" ] && [ "${MODE}" = "0" ]; then
+	if [ -f "${RESPONSES_DIR}/${SENDER}" ]; then
+		#Delete a user's existing autoresponse message.
+		(${0} -D "${SENDER}")
+		if [ ! -f "${RESPONSES_DIR}/${SENDER}" ]; then
+			${LOGGER} -i -t autoresponse -p mail.notice "Autoresponse disabled for address: ${SENDER} by SASL authenticated user: ${SASL_USERNAME} from: ${CLIENT_IP}"
+			(echo -e "From: ${RECIPIENT}\nTo: ${SENDER}\nSubject: Out of Office\n\n"
+			echo "Autoresponse disabled for ${SENDER} by SASL authenticated user: ${SASL_USERNAME} from: ${CLIENT_IP}") | ${SENDMAIL} -i -f "${RECIPIENT}" "${SENDER}"
+		else
+		${LOGGER} -i -t autoresponse -p mail.notice "Autoresponse could not be disabled for address: ${SENDER}"
+		fi
+	elif  [ ! -f "${RESPONSES_DIR}/${SENDER}" ]; then
+		#Read from STDIN and save this as the user's autoresponse message. 
+		#This will overwrite any pre-existing autoresponse messages!
+		cat > "${RESPONSES_DIR}/${SENDER}"
+		if [ -f "${RESPONSES_DIR}/${SENDER}" ]; then 
+			${LOGGER} -i -t autoresponse -p mail.notice "Autoresponse enabled for address: ${SENDER} by SASL authenticated user: ${SASL_USERNAME} from: ${CLIENT_IP}" 
+			(echo -e "From: ${RECIPIENT}\nTo: ${SENDER}\nSubject: Out of Office\n\n"
+			echo "Autoresponse enabled for ${SENDER} by SASL authenticated user: ${SASL_USERNAME} from: ${CLIENT_IP}") | ${SENDMAIL} -i -f "${RECIPIENT}" "${SENDER}"
+		else
+			${LOGGER} -i -t autoresponse -p mail.notice "Autoresponse could not be enabled for address: ${SENDER}"
+		fi
+	fi
+#Log any unauthenticated shenanigans. We're attempting to prevent two scenarios here:
+#
+#(1) A user sends an e-mail to user+autoresponse@domain.tld from user@domain.tld through an open relay
+#    in an unauthorized attempt to set an autoresponse for the real user@domain.tld. The open relay
+#    will relay the message but because it will not authenticate with the mail server for domain.tld
+#    AUTHENTICATED will equal 0 and the user portion of the recipient address will equal user+autoresponse.
+#    Since we do not allow unauthenticated users to set autoresponse messages, we log this attempt as
+#    suspicious and exit cleanly so that postfix doesn't generate a bounce message.
+#
+#(2) A user sends e-mail to user+autoresponse@domain.tld from user@domain.tld through a mail server
+#    that requires authentication, (but allows relaying) and has autoresponse configured. This will result in 
+#    an autoresponse toggle message being sent to the real user@domain.tld, notifying them that their
+#    autoresponse message has been enabled or disabled when in fact it has not. This scenario is rarer
+#    than the first and it is mainly meant to protect against compromised accounts and/or potential abuse 
+#    by legitimate users of the rogue mail server.
+#
+elif [ "${AUTHENTICATED}" = "0" ] && [ "${RECIPIENT/@*/}" = "${SENDER/@*/+autoresponse}" ] || [ "${SENDER/@*/+autoresponse}" = "${RECIPIENT/@*/+autoresponse+autoresponse}" ] && [ "${MODE}" = "0" ]; then
+	${LOGGER} -i -t autoresponse -p mail.warning "Unauthenticated attempt to set autoresponse message for ${SENDER/+autoresponse/} from ${CLIENT_IP}!"
+	exit 0 
+#Finally, if the user recipient address does not equal user+autoresponse then we assume that it's 
+#just a normal message. We check to see if the recipient has an autoresponse message set; if one
+#has not already been sent to the sender within our timeframe, we send it and then we deliver the
+#original message to the original recipient.
+elif [ "${RECIPIENT/@*/}" != "${SENDER/@*/+autoresponse}" ] && [ "${MODE}" = "0" ]; then
+	rate_log_check() {
+		#Only send one autoresponse per e-mail address per the time limit (in seconds) designated by the RESPONSE_RATE variable 
+		if [ -f "${RATE_LOG_DIR}/${RECIPIENT}/${SENDER}" ]; then
+			declare ELAPSED_TIME=`echo $[\`date +%s\` - \`stat -c %X "${RATE_LOG_DIR}/${RECIPIENT}/${SENDER}"\`]`
+			if [ "${ELAPSED_TIME}" -lt "${RESPONSE_RATE}" ]; then
+				${LOGGER} -i -t autoresponse -p mail.notice "An autoresponse has already been sent from ${RECIPIENT} to ${SENDER} within the last ${RESPONSE_RATE} seconds"
+				SEND_RESPONSE=0
+			fi
+		fi
+	}
+	if [ -f "${RESPONSES_DIR}/${RECIPIENT}" ]; then
+		rate_log_check
+		#If SEND_RESPONSE still equals "1" after the rate_log_check function, send an autoresponse.
+		if [ "${SEND_RESPONSE}" = "1" ] && [ "${RECIPIENT}" != "${SENDER}" ]; then 
+			(cat "${RESPONSES_DIR}/${RECIPIENT}") | sed -e "0,/^$/ { s/^To:.*/To: <${SENDER}>/ }" -e '0,/^$/ { /^Date:/ d }' | ${SENDMAIL} -i -f "${RECIPIENT}" "${SENDER}"
+			mkdir -p "${RATE_LOG_DIR}/${RECIPIENT}"
+			touch "${RATE_LOG_DIR}/${RECIPIENT}/${SENDER}"  
+			${LOGGER} -i -t autoresponse -p mail.notice "Autoresponse sent from ${RECIPIENT} to ${SENDER}"
+		fi
+	fi
+	exec ${SENDMAIL} -i -f "${SENDER}" "${RECIPIENT}" 
+fi
+#Check to see if we are editing or creating a new autoresponse for a user.
+#This should only be used from the command line unlike -D, -d, and -E which
+#could be used via postfix pipe or in other areas where no user interaction
+#is required.
+if [ "${AUTORESPONSE_MESSAGE}" != "unset" ] && [ "${MODE}" = "1" ]; then
+	#Check to see if an autoresponse message exists for the email address specified by the "AUTORESPONSE_MESSAGE" parameter, if one exists
+	#then edit the existing one, if one does not exist, create a new one. This action will ignore any disabled autoresponse messages.
+	if [ -f "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}" ]; then
+		vi "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}"
+	elif ! [ -f "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}" ]; then
+		vi "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}"
+		if [ -f "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}" ]; then
+			#Insert our mail headers; people who will be setting autoresponses from the command line
+			#hopefully will know better than to screw with these when editing an existing autoresponse.
+			sed -i "1i\From: ${AUTORESPONSE_MESSAGE}\nTo: THIS GETS REPLACED\nSubject: Out Of Office\n\n" "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}"
+		fi
+	fi
+	if [ -f "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}" ]; then
+		chown autoresponse.autoresponse "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}"
+		chmod 600 "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}"
+	else
+			echo "Editing ${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE} aborted!"
+			exit 1
+	fi
+#Are we disabling an existing autoresponse message?
+elif [ "${DISABLE_AUTORESPONSE}" != "unset" ] && [ "${MODE}" = "1" ]; then
+	if [ -f "${RESPONSES_DIR}/${DISABLE_AUTORESPONSE}" ]; then
+		mv -i "${RESPONSES_DIR}/${DISABLE_AUTORESPONSE}" "${RESPONSES_DIR}/${DISABLE_AUTORESPONSE}_DISABLED"
+	elif ! [ -f "${RESPONSES_DIR}/${DISABLE_AUTORESPONSE}" ]; then
+		echo "${RESPONSES_DIR}/${DISABLE_AUTORESPONSE} does not exist thus, it cannot be disabled!"
+		exit 1
+	fi
+#Are we enabling an existing autoresponse message?
+elif [ "${ENABLE_AUTORESPONSE}" != "unset" ] && [ "${MODE}" = "1" ]; then
+	if [ -f "${RESPONSES_DIR}/${ENABLE_AUTORESPONSE}_DISABLED" ]; then
+		mv -i "${RESPONSES_DIR}/${ENABLE_AUTORESPONSE}_DISABLED" "${RESPONSES_DIR}/${ENABLE_AUTORESPONSE}"
+	elif ! [ -f "${RESPONSES_DIR}/${ENABLE_AUTORESPONSE}_DISABLED" ]; then
+		echo "There is no disabled autoresponse for ${ENABLE_AUTORESPONSE}"
+		exit 1
+	fi
+#Are we deleting an existing autoresponse message (this does not delete disabled autoresponse messages)?
+elif [ "${DELETE_AUTORESPONSE}" != "unset" ] && [ "${MODE}" = "1" ]; then
+	if [ -f "${RESPONSES_DIR}/${DELETE_AUTORESPONSE}" ]; then 
+		rm "${RESPONSES_DIR}/${DELETE_AUTORESPONSE}"
+	elif ! [ -f "${RESPONSES_DIR}/${DELETE_AUTORESPONSE}" ]; then
+		echo "${RESPONSES_DIR}/${DELETE_AUTORESPONSE} does not exist thus, it cannot be deleted!"
+		exit 1
+	fi
+fi
