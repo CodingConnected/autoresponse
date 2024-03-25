@@ -46,7 +46,7 @@ Then run...
 
 ... and restart Postfix:
 
-    sudo systemctl restart restart
+    sudo systemctl restart postfix
 
 If you have users with shell access, and you want these users to be able to create autoresponder messages themselves on the shell, you must add each user account to the autoresponse group, e.g. as follows for the system user john:
 
