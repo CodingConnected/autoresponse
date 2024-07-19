@@ -141,9 +141,11 @@ elif [ "${AUTHENTICATED}" = "0" ] && [ "${RECIPIENT/@*/}" = "${SENDER/@*/+autore
 #original message to the original recipient.
 elif [ "${RECIPIENT/@*/}" != "${SENDER/@*/+autoresponse}" ] && [ "${MODE}" = "0" ]; then
 	rate_log_check() {
+		local file_age
 		#Only send one autoresponse per e-mail address per the time limit (in seconds) designated by the RESPONSE_RATE variable 
 		if [ -f "${RATE_LOG_DIR}/${RECIPIENT}/${SENDER}" ]; then
-			declare ELAPSED_TIME=`echo $[\`date +%s\` - \`stat -c %X "${RATE_LOG_DIR}/${RECIPIENT}/${SENDER}"\`]`
+			file_age=$(stat -c %Y "${RATE_LOG_DIR}/${RECIPIENT}/${SENDER}" 2>/dev/null || stat -f %m "${RATE_LOG_DIR}/${RECIPIENT}/${SENDER}")
+			declare ELAPSED_TIME=`echo $[\`date +%s\` - $file_age]`
 			if [ "${ELAPSED_TIME}" -lt "${RESPONSE_RATE}" ]; then
 				${LOGGER} -i -t autoresponse -p mail.notice "An autoresponse has already been sent from ${RECIPIENT} to ${SENDER} within the last ${RESPONSE_RATE} seconds"
 				SEND_RESPONSE=0
@@ -154,7 +156,7 @@ elif [ "${RECIPIENT/@*/}" != "${SENDER/@*/+autoresponse}" ] && [ "${MODE}" = "0"
 		rate_log_check
 		#If SEND_RESPONSE still equals "1" after the rate_log_check function, send an autoresponse.
 		if [ "${SEND_RESPONSE}" = "1" ] && [ "${RECIPIENT}" != "${SENDER}" ]; then 
-			(cat "${RESPONSES_DIR}/${RECIPIENT}") | sed -e "0,/^$/ { s/^To:.*/To: <${SENDER}>/ }" -e '0,/^$/ { /^Date:/ d }' | ${SENDMAIL} -i -f "${RECIPIENT}" "${SENDER}"
+			(cat "${RESPONSES_DIR}/${RECIPIENT}") | sed -e "1,/^$/{ s/^To:.*/To: <${SENDER}>/; }" -e '1,/^$/ { /^Date:/d; }' | ${SENDMAIL} -i -f "${RECIPIENT}" "${SENDER}"
 			mkdir -p "${RATE_LOG_DIR}/${RECIPIENT}"
 			touch "${RATE_LOG_DIR}/${RECIPIENT}/${SENDER}"  
 			${LOGGER} -i -t autoresponse -p mail.notice "Autoresponse sent from ${RECIPIENT} to ${SENDER}"
@@ -176,12 +178,21 @@ if [ "${AUTORESPONSE_MESSAGE}" != "unset" ] && [ "${MODE}" = "1" ]; then
 		if [ -f "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}" ]; then
 			#Insert our mail headers; people who will be setting autoresponses from the command line
 			#hopefully will know better than to screw with these when editing an existing autoresponse.
-			sed -i "1i\From: ${AUTORESPONSE_MESSAGE}\nTo: THIS GETS REPLACED\nSubject: Out Of Office\n\n" "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}"
+			HEADER_TMPFILE=$(mktemp /tmp/autoresponse_headers.XXXXXXXXX)
+			cat > "${HEADER_TMPFILE}" <<EOF
+From: ${AUTORESPONSE_MESSAGE}
+To: THIS GETS REPLACED
+Subject: Out Of Office
+
+EOF
+			cat "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}" >> "${HEADER_TMPFILE}"
+			cat ${HEADER_TMPFILE} > "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}"
+			rm "${HEADER_TMPFILE}"
 		fi
 	fi
 	if [ -f "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}" ]; then
-		chown autoresponse.autoresponse "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}"
-		chmod 600 "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}"
+		chgrp autoresponse "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}"
+		chmod 660 "${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE}"
 	else
 			echo "Editing ${RESPONSES_DIR}/${AUTORESPONSE_MESSAGE} aborted!"
 			exit 1
